@@ -1,0 +1,10 @@
+{
+  "portfolio_valuations": {
+    "tenant_field": "client_id",
+    "entity_field": "portfolio_company_id",
+    "position_field": "source_lsn",
+    "operation_field": "change_kind",
+    "after_field": "valuation",
+    "schema_version": 1
+  }
+}

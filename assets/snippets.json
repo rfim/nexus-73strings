@@ -1,0 +1,146 @@
+{
+  "postgres": {
+    "title": "PostgreSQL source contract",
+    "description": "A tenant-aware relational source table. WAL LSN comes from capture metadata.",
+    "scope": "Illustrative source schema; no PostgreSQL service is deployed.",
+    "filename": "examples/postgres_source.sql",
+    "language": "SQL",
+    "code": "-- Illustrative PostgreSQL source table; WAL LSN belongs to capture metadata.\nCREATE TABLE portfolio_valuations (\n    tenant_id TEXT NOT NULL,\n    entity_id TEXT NOT NULL,\n    fair_value_usd NUMERIC(24, 2) NOT NULL,\n    valuation_date DATE NOT NULL,\n    updated_at TIMESTAMPTZ NOT NULL,\n    PRIMARY KEY (tenant_id, entity_id)\n);",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/postgres_source.sql#L1-L9"
+  },
+  "feed": {
+    "title": "APIs & files feed metadata",
+    "description": "A named feed maps client, entity, source position and valuation fields into one contract.",
+    "scope": "Inspectable configuration for the tested local adapter.",
+    "filename": "examples/feed_manifest.json",
+    "language": "JSON",
+    "code": "{\n  \"portfolio_valuations\": {\n    \"tenant_field\": \"client_id\",\n    \"entity_field\": \"portfolio_company_id\",\n    \"position_field\": \"source_lsn\",\n    \"operation_field\": \"change_kind\",\n    \"after_field\": \"valuation\",\n    \"schema_version\": 1\n  }\n}",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/feed_manifest.json#L1-L10"
+  },
+  "debezium": {
+    "title": "CDC envelope contract",
+    "description": "Validate tenant, key, source LSN, operation, schema version and valuation payload.",
+    "scope": "Runnable synthetic envelope parser; Debezium and Kafka Connect are not running here.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def parse_change(raw: dict) -> Change:\n    \"\"\"Validate one CDC envelope before any row is published.\"\"\"\n    tenant_id = raw.get(\"tenant_id\")\n    entity_id = raw.get(\"entity_id\")\n    lsn = raw.get(\"lsn\")\n    op = raw.get(\"op\")\n    if not isinstance(tenant_id, str) or not tenant_id.strip():\n        raise ValueError(\"tenant_id is required\")\n    if not isinstance(entity_id, str) or not entity_id.strip():\n        raise ValueError(\"entity_id is required\")\n    if isinstance(lsn, bool) or not isinstance(lsn, int) or lsn < 1:\n        raise ValueError(\"lsn must be a positive integer\")\n    if op not in {\"c\", \"u\", \"r\", \"d\"}:\n        raise ValueError(\"unsupported CDC operation\")\n    if raw.get(\"schema_version\") != 1:\n        raise ValueError(\"unsupported schema version\")\n    if op == \"d\":\n        return Change(tenant_id, entity_id, lsn, op, None, None)\n\n    after = raw.get(\"after\")\n    if not isinstance(after, dict):\n        raise ValueError(\"upsert needs an after image\")\n    try:\n        fair_value = Decimal(str(after[\"fair_value_usd\"]))\n        valuation_date = date.fromisoformat(after[\"valuation_date\"]).isoformat()\n    except (InvalidOperation, KeyError, TypeError, ValueError) as exc:\n        raise ValueError(\"invalid fair value or valuation date\") from exc\n    if not fair_value.is_finite() or fair_value < 0:\n        raise ValueError(\"fair value must be finite and non-negative\")\n    return Change(tenant_id, entity_id, lsn, op, fair_value, valuation_date)",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L47-L76"
+  },
+  "manifest": {
+    "title": "Metadata-driven adapter",
+    "description": "Map a new feed through reviewed metadata and validate it against the shared CDC contract.",
+    "scope": "Runnable adapter tested with a synthetic valuation feed.",
+    "filename": "examples/feed_config.py",
+    "language": "PYTHON",
+    "code": "def map_feed_record(record: dict, config: dict) -> dict:\n    \"\"\"Make a new feed a mapping, while keeping the common CDC contract.\"\"\"\n    if not REQUIRED.issubset(config):\n        raise ValueError(\"feed is missing required metadata\")\n    envelope = {\n        \"tenant_id\": record[config[\"tenant_field\"]],\n        \"entity_id\": record[config[\"entity_field\"]],\n        \"lsn\": record[config[\"position_field\"]],\n        \"op\": record[config[\"operation_field\"]],\n        \"after\": record.get(config[\"after_field\"]),\n        \"schema_version\": config[\"schema_version\"],\n    }\n    parse_change(envelope)\n    return envelope",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/feed_config.py#L21-L34"
+  },
+  "delta": {
+    "title": "Azure Databricks Delta MERGE",
+    "description": "Deduplicate a source batch by tenant, entity and LSN, then update only when the source is newer.",
+    "scope": "Illustrative Databricks SQL; not deployed to an Azure workspace.",
+    "filename": "examples/delta_cdc.sql",
+    "language": "SQL",
+    "code": "-- Illustrative Databricks Delta MERGE for the role's Azure platform.\n-- The Python example separately tests ordering, delete and replay behavior.\nMERGE INTO silver.current_valuations AS target\nUSING (\n    SELECT tenant_id, entity_id, lsn, op, fair_value_usd, valuation_date\n    FROM (\n        SELECT *, ROW_NUMBER() OVER (\n            PARTITION BY tenant_id, entity_id ORDER BY lsn DESC\n        ) AS row_rank\n        FROM silver.valid_cdc_events\n    ) ranked\n    WHERE row_rank = 1\n) AS source\nON target.tenant_id = source.tenant_id\n   AND target.entity_id = source.entity_id\nWHEN MATCHED AND source.lsn > target.lsn THEN UPDATE SET\n    target.lsn = source.lsn,\n    target.is_deleted = (source.op = 'd'),\n    target.fair_value_usd = source.fair_value_usd,\n    target.valuation_date = source.valuation_date\nWHEN NOT MATCHED THEN INSERT (\n    tenant_id, entity_id, lsn, is_deleted, fair_value_usd, valuation_date\n) VALUES (\n    source.tenant_id, source.entity_id, source.lsn,\n    (source.op = 'd'), source.fair_value_usd, source.valuation_date\n);",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/delta_cdc.sql#L1-L26"
+  },
+  "raw": {
+    "title": "Bronze trace envelope",
+    "description": "Retain the source key, LSN, operation, schema version, raw payload and capture method.",
+    "scope": "Local Python reference for traceable raw history; no ADLS write is deployed.",
+    "filename": "examples/bronze_envelope.py",
+    "language": "PYTHON",
+    "code": "def bronze_record(raw: dict, capture_method: str) -> dict:\n    \"\"\"Retain source identity and payload for traceable reprocessing.\"\"\"\n    if not capture_method:\n        raise ValueError(\"capture method is required\")\n    return {\n        \"tenant_id\": raw[\"tenant_id\"],\n        \"entity_id\": raw[\"entity_id\"],\n        \"source_lsn\": raw[\"lsn\"],\n        \"operation\": raw[\"op\"],\n        \"schema_version\": raw[\"schema_version\"],\n        \"raw_payload\": raw.get(\"after\"),\n        \"capture_method\": capture_method,\n        \"ingested_at\": datetime.now(timezone.utc).isoformat(),\n    }",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/bronze_envelope.py#L6-L19"
+  },
+  "scd2": {
+    "title": "Silver SCD2 history",
+    "description": "Close each accepted version at the next source LSN and stop at a delete.",
+    "scope": "Runnable synthetic history function with a passing behavior test.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def scd2_versions(raw_events: list[dict], tenant_id: str, entity_id: str) -> list[dict]:\n    \"\"\"Build a simple LSN-bounded history for one tenant and entity.\"\"\"\n    changes = sorted((parse_change(raw) for raw in raw_events\n                      if raw.get(\"tenant_id\") == tenant_id and raw.get(\"entity_id\") == entity_id),\n                     key=lambda item: item.lsn)\n    versions: list[dict] = []\n    for change in changes:\n        if versions and change.lsn <= versions[-1][\"valid_from_lsn\"]:\n            continue\n        if versions and versions[-1][\"valid_to_lsn\"] is None:\n            versions[-1][\"valid_to_lsn\"] = change.lsn\n        if change.operation != \"d\":\n            versions.append({\"valid_from_lsn\": change.lsn, \"valid_to_lsn\": None,\n                             \"fair_value_usd\": str(change.fair_value_usd),\n                             \"valuation_date\": change.valuation_date})\n    return versions",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L154-L169"
+  },
+  "gold": {
+    "title": "Gold valuation view",
+    "description": "Expose current, non-deleted valuations with tenant and source lineage.",
+    "scope": "Illustrative Databricks SQL; no Gold view is deployed.",
+    "filename": "examples/gold_valuation.sql",
+    "language": "SQL",
+    "code": "-- Illustrative Databricks SQL view over a validated Delta Silver table.\nCREATE OR REPLACE VIEW gold.latest_portfolio_valuations AS\nSELECT\n    tenant_id,\n    entity_id,\n    fair_value_usd,\n    valuation_date,\n    lsn AS source_lsn\nFROM silver.current_valuations\nWHERE is_deleted = false;",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/gold_valuation.sql#L1-L10"
+  },
+  "quarantine": {
+    "title": "Apply + quarantine",
+    "description": "Invalid rows and same-LSN conflicts get reasons; valid changes apply in source order.",
+    "scope": "Runnable synthetic CDC reference with behavior tests.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def apply_batch(prior: dict[tuple[str, str], CurrentRow], raw_events: list[dict]) -> BatchOutcome:\n    \"\"\"Apply valid changes by source log position; quarantine invalid rows.\"\"\"\n    state = dict(prior)\n    valid: list[Change] = []\n    rejected: list[RejectedRow] = []\n    for raw in raw_events:\n        try:\n            valid.append(parse_change(raw))\n        except (AttributeError, TypeError, ValueError) as exc:\n            rejected.append(RejectedRow(raw, str(exc)))\n\n    applied = replayed = 0\n    for change in sorted(valid, key=lambda item: (item.tenant_id, item.entity_id, item.lsn)):\n        key = (change.tenant_id, change.entity_id)\n        current = state.get(key)\n        if current and change.lsn < current.lsn:\n            replayed += 1\n            continue\n        candidate = CurrentRow(change.lsn, change.operation == \"d\",\n                               change.fair_value_usd, change.valuation_date)\n        if current and change.lsn == current.lsn:\n            if candidate == current:\n                replayed += 1\n            else:\n                rejected.append(RejectedRow({\"tenant_id\": change.tenant_id,\n                                             \"entity_id\": change.entity_id,\n                                             \"lsn\": change.lsn}, \"conflicting event at same LSN\"))\n            continue\n        state[key] = candidate\n        applied += 1\n    return BatchOutcome(state, applied, replayed, tuple(rejected))",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L79-L109"
+  },
+  "reconcile": {
+    "title": "Source-to-delivery reconciliation",
+    "description": "Compare the expected rows for one tenant with the exact delivery payload.",
+    "scope": "Tested local destination check; production warehouse reads would extend it.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def reconcile_delivery(state: dict[tuple[str, str], CurrentRow], payload: dict) -> bool:\n    \"\"\"Compare the tenant-scoped expected rows with a delivery payload.\"\"\"\n    if payload.get(\"destination\") not in DESTINATIONS:\n        return False\n    tenant_id = payload.get(\"tenant_id\")\n    if not isinstance(tenant_id, str) or not tenant_id:\n        return False\n    expected = visible_for_tenant(state, tenant_id)\n    actual = payload.get(\"rows\")\n    if not isinstance(actual, list) or any(\n        not isinstance(row, dict) or not isinstance(row.get(\"entity_id\"), str)\n        for row in actual\n    ):\n        return False\n    return expected == sorted(actual, key=lambda row: row[\"entity_id\"])",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L137-L151"
+  },
+  "delivery": {
+    "title": "Tenant-safe delivery contract",
+    "description": "Only approved destinations receive rows filtered to the requested client tenant.",
+    "scope": "Tested local payload builder; no external warehouse connection is deployed.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def delivery_payload(state: dict[tuple[str, str], CurrentRow], tenant_id: str,\n                     destination: str) -> dict:\n    \"\"\"Build a tenant-scoped contract for an approved sink; no network write.\"\"\"\n    if destination not in DESTINATIONS:\n        raise ValueError(\"destination is not approved\")\n    return {\"tenant_id\": tenant_id, \"destination\": destination,\n            \"rows\": visible_for_tenant(state, tenant_id)}",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L128-L134"
+  },
+  "snowflake": {
+    "title": "Snowflake delivery boundary",
+    "description": "The tested payload builder allows Snowflake and filters by client tenant.",
+    "scope": "Destination contract only; no Snowflake connector or load is deployed.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def delivery_payload(state: dict[tuple[str, str], CurrentRow], tenant_id: str,\n                     destination: str) -> dict:\n    \"\"\"Build a tenant-scoped contract for an approved sink; no network write.\"\"\"\n    if destination not in DESTINATIONS:\n        raise ValueError(\"destination is not approved\")\n    return {\"tenant_id\": tenant_id, \"destination\": destination,\n            \"rows\": visible_for_tenant(state, tenant_id)}",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L128-L134"
+  },
+  "sqlserver": {
+    "title": "SQL Server delivery boundary",
+    "description": "The tested payload builder allows SQL Server and filters by client tenant.",
+    "scope": "Destination contract only; no SQL Server connector or load is deployed.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def delivery_payload(state: dict[tuple[str, str], CurrentRow], tenant_id: str,\n                     destination: str) -> dict:\n    \"\"\"Build a tenant-scoped contract for an approved sink; no network write.\"\"\"\n    if destination not in DESTINATIONS:\n        raise ValueError(\"destination is not approved\")\n    return {\"tenant_id\": tenant_id, \"destination\": destination,\n            \"rows\": visible_for_tenant(state, tenant_id)}",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L128-L134"
+  },
+  "databricks": {
+    "title": "Databricks delivery boundary",
+    "description": "The tested payload builder allows Databricks and filters by client tenant.",
+    "scope": "Destination contract only; no external workspace publish is deployed.",
+    "filename": "examples/cdc_reference.py",
+    "language": "PYTHON",
+    "code": "def delivery_payload(state: dict[tuple[str, str], CurrentRow], tenant_id: str,\n                     destination: str) -> dict:\n    \"\"\"Build a tenant-scoped contract for an approved sink; no network write.\"\"\"\n    if destination not in DESTINATIONS:\n        raise ValueError(\"destination is not approved\")\n    return {\"tenant_id\": tenant_id, \"destination\": destination,\n            \"rows\": visible_for_tenant(state, tenant_id)}",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/cdc_reference.py#L128-L134"
+  },
+  "ci": {
+    "title": "GitHub Actions test workflow",
+    "description": "The repository runs the synthetic CDC and feed-manifest tests on pushes and pull requests.",
+    "scope": "Actual CI configuration in this repository.",
+    "filename": ".github/workflows/ci.yml",
+    "language": "YAML",
+    "code": "name: Reference checks\n\non:\n  push:\n  pull_request:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n      - name: Check synthetic CDC reference\n        run: python -m unittest discover -s examples -p 'test_*.py' -v",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/.github/workflows/ci.yml#L1-L16"
+  },
+  "replaytest": {
+    "title": "Replay and conflict test",
+    "description": "A replay leaves state unchanged; a conflicting event at the same LSN is quarantined.",
+    "scope": "Runnable unit test with synthetic events.",
+    "filename": "examples/test_cdc_reference.py",
+    "language": "PYTHON",
+    "code": "    def test_replay_is_idempotent_and_conflict_is_quarantined(self):\n        batch = [event(lsn=5, value=\"125\")]\n        first = apply_batch({}, batch)\n        replay = apply_batch(first.state, batch)\n        conflict = apply_batch(first.state, [event(lsn=5, value=\"999\")])\n        self.assertEqual(replay.state, first.state)\n        self.assertEqual(replay.replayed_or_stale, 1)\n        self.assertEqual(conflict.state, first.state)\n        self.assertEqual(conflict.quarantined[0].reason, \"conflicting event at same LSN\")\n        self.assertTrue(conflict.reconciles(1))",
+    "link": "https://github.com/rfim/nexus-73strings/blob/main/examples/test_cdc_reference.py#L24-L33"
+  }
+}
