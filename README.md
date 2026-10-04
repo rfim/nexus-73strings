@@ -22,4 +22,4 @@ After changing example source files, regenerate the source-backed website excerp
 python3 scripts/build_snippets.py
 ```
 
-The technology icons are vendored from [Devicon](https://github.com/devicons/devicon), [Simple Icons](https://github.com/simple-icons/simple-icons), and the [Delta Lake website](https://github.com/delta-io/website). License and notice files are in `assets/`. Technology marks identify tools and do not imply endorsement. The Roojai/Lifepal image was provided by the portfolio owner in a previous iteration of this case study.
+The technology icons are vendored from [Devicon](https://github.com/devicons/devicon), [Simple Icons](https://github.com/simple-icons/simple-icons), and the [Delta Lake website](https://github.com/delta-io/website). License and notice files are in `assets/`. Technology marks identify tools and do not imply endorsement. The 73 Strings logo and Roojai/Lifepal image were supplied by the portfolio owner.
